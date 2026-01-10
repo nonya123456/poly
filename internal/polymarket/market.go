@@ -17,13 +17,12 @@ const WebSocketMarketURL = "wss://ws-subscriptions-clob.polymarket.com/ws/market
 type EventType string
 
 const (
-	EventTypeBook            EventType = "book"
-	EventTypePriceChange     EventType = "price_change"
-	EventTypeTickSizeChange  EventType = "tick_size_change"
-	EventTypeLastTradePrice  EventType = "last_trade_price"
+	EventTypeBook           EventType = "book"
+	EventTypePriceChange    EventType = "price_change"
+	EventTypeTickSizeChange EventType = "tick_size_change"
+	EventTypeLastTradePrice EventType = "last_trade_price"
 )
 
-// BaseEvent contains common fields for all events
 type BaseEvent struct {
 	EventType EventType `json:"event_type"`
 	Timestamp string    `json:"timestamp"`
@@ -31,13 +30,11 @@ type BaseEvent struct {
 	AssetID   string    `json:"asset_id"`
 }
 
-// BookLevel represents a price/size pair in the orderbook
 type BookLevel struct {
 	Price string `json:"price"`
 	Size  string `json:"size"`
 }
 
-// BookEvent is sent when subscribing or when trades affect the orderbook
 type BookEvent struct {
 	BaseEvent
 	Bids []BookLevel `json:"bids"`
@@ -49,10 +46,9 @@ func (e BookEvent) CSVHeader() []string {
 }
 
 func (e BookEvent) CSVRow() []string {
-	return nil // Not used directly; we expand to multiple rows
+	return nil
 }
 
-// BookLevelRecord is used for CSV output of book events
 type BookLevelRecord struct {
 	Timestamp string
 	Market    string
@@ -77,7 +73,6 @@ func (r BookLevelRecord) CSVRow() []string {
 	}
 }
 
-// PriceChangeItem represents a single price change
 type PriceChangeItem struct {
 	AssetID string `json:"asset_id"`
 	Price   string `json:"price"`
@@ -88,13 +83,11 @@ type PriceChangeItem struct {
 	BestAsk string `json:"best_ask"`
 }
 
-// PriceChangeEvent is triggered when orders are placed or canceled
 type PriceChangeEvent struct {
 	BaseEvent
 	Changes []PriceChangeItem `json:"price_changes"`
 }
 
-// PriceChangeRecord is used for CSV output
 type PriceChangeRecord struct {
 	Timestamp string
 	Market    string
@@ -125,7 +118,6 @@ func (r PriceChangeRecord) CSVRow() []string {
 	}
 }
 
-// TickSizeChangeEvent is emitted when tick size adjusts
 type TickSizeChangeEvent struct {
 	BaseEvent
 	OldTickSize string `json:"old_tick_size"`
@@ -146,7 +138,6 @@ func (e TickSizeChangeEvent) CSVRow() []string {
 	}
 }
 
-// LastTradePriceEvent is emitted when orders match
 type LastTradePriceEvent struct {
 	BaseEvent
 	Price      string `json:"price"`
@@ -171,31 +162,45 @@ func (e LastTradePriceEvent) CSVRow() []string {
 	}
 }
 
-// MarketSubscriber subscribes to the market websocket channel and writes events to CSV
+type TokenMetadata struct {
+	MarketSlug  string
+	OutcomeName string
+}
+
 type MarketSubscriber struct {
 	conn      *websocket.Conn
 	outputDir string
+	tokens    map[string]*TokenMetadata
 	done      chan struct{}
 	mu        sync.Mutex
 }
 
-// NewMarketSubscriber creates a new market subscriber
 func NewMarketSubscriber(outputDir string) *MarketSubscriber {
 	return &MarketSubscriber{
 		outputDir: outputDir,
+		tokens:    make(map[string]*TokenMetadata),
 		done:      make(chan struct{}),
 	}
 }
 
-// subscribeMessage is the message sent to subscribe to market updates
 type subscribeMessage struct {
 	Type    string   `json:"type"`
 	Channel string   `json:"channel"`
 	Assets  []string `json:"assets_ids"`
 }
 
-// Subscribe connects to the websocket and subscribes to market updates for the given asset IDs
-func (s *MarketSubscriber) Subscribe(assetIDs []string) error {
+func (s *MarketSubscriber) Subscribe(market Market) error {
+	for i, tokenID := range market.ClobTokenIDs {
+		outcomeName := "unknown"
+		if i < len(market.Outcomes) {
+			outcomeName = market.Outcomes[i]
+		}
+		s.tokens[tokenID] = &TokenMetadata{
+			MarketSlug:  market.Slug,
+			OutcomeName: outcomeName,
+		}
+	}
+
 	conn, _, err := websocket.DefaultDialer.Dial(WebSocketMarketURL, nil)
 	if err != nil {
 		return fmt.Errorf("dial websocket: %w", err)
@@ -205,7 +210,7 @@ func (s *MarketSubscriber) Subscribe(assetIDs []string) error {
 	msg := subscribeMessage{
 		Type:    "subscribe",
 		Channel: "market",
-		Assets:  assetIDs,
+		Assets:  market.ClobTokenIDs,
 	}
 
 	if err := conn.WriteJSON(msg); err != nil {
@@ -237,7 +242,6 @@ func (s *MarketSubscriber) readLoop() {
 }
 
 func (s *MarketSubscriber) handleMessage(data []byte) error {
-	// Check if it's an array (batch of events)
 	if len(data) > 0 && data[0] == '[' {
 		var events []json.RawMessage
 		if err := json.Unmarshal(data, &events); err != nil {
@@ -254,7 +258,6 @@ func (s *MarketSubscriber) handleMessage(data []byte) error {
 }
 
 func (s *MarketSubscriber) handleSingleEvent(data []byte) error {
-	// First, determine the event type
 	var base BaseEvent
 	if err := json.Unmarshal(data, &base); err != nil {
 		return fmt.Errorf("unmarshal base event: %w", err)
@@ -270,15 +273,21 @@ func (s *MarketSubscriber) handleSingleEvent(data []byte) error {
 	case EventTypeLastTradePrice:
 		return s.handleLastTradePriceEvent(data)
 	default:
-		// Unknown event type, log and skip
 		log.Printf("unknown event type: %s", base.EventType)
 		return nil
 	}
 }
 
-func (s *MarketSubscriber) csvPath(marketID string, eventType EventType) string {
-	sanitized := SanitizeMarketID(marketID)
-	filename := fmt.Sprintf("%s_%s.csv", sanitized, eventType)
+func (s *MarketSubscriber) csvPath(assetID string, eventType EventType) string {
+	slug := "unknown"
+	outcomeName := "unknown"
+
+	if meta, ok := s.tokens[assetID]; ok {
+		slug = strings.ToLower(meta.MarketSlug)
+		outcomeName = strings.ToLower(meta.OutcomeName)
+	}
+
+	filename := fmt.Sprintf("%s_%s_%s.csv", slug, outcomeName, eventType)
 	return filepath.Join(s.outputDir, filename)
 }
 
@@ -314,7 +323,7 @@ func (s *MarketSubscriber) handleBookEvent(data []byte) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.Market, EventTypeBook), records)
+	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeBook), records)
 }
 
 func (s *MarketSubscriber) handlePriceChangeEvent(data []byte) error {
@@ -323,9 +332,9 @@ func (s *MarketSubscriber) handlePriceChangeEvent(data []byte) error {
 		return fmt.Errorf("unmarshal price_change event: %w", err)
 	}
 
-	var records []PriceChangeRecord
+	recordsByAsset := make(map[string][]PriceChangeRecord)
 	for _, change := range event.Changes {
-		records = append(records, PriceChangeRecord{
+		record := PriceChangeRecord{
 			Timestamp: event.Timestamp,
 			Market:    event.Market,
 			AssetID:   change.AssetID,
@@ -335,12 +344,18 @@ func (s *MarketSubscriber) handlePriceChangeEvent(data []byte) error {
 			Hash:      change.Hash,
 			BestBid:   change.BestBid,
 			BestAsk:   change.BestAsk,
-		})
+		}
+		recordsByAsset[change.AssetID] = append(recordsByAsset[change.AssetID], record)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.Market, EventTypePriceChange), records)
+	for assetID, records := range recordsByAsset {
+		if err := util.AppendCSV(s.csvPath(assetID, EventTypePriceChange), records); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *MarketSubscriber) handleTickSizeChangeEvent(data []byte) error {
@@ -351,7 +366,7 @@ func (s *MarketSubscriber) handleTickSizeChangeEvent(data []byte) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.Market, EventTypeTickSizeChange), []TickSizeChangeEvent{event})
+	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeTickSizeChange), []TickSizeChangeEvent{event})
 }
 
 func (s *MarketSubscriber) handleLastTradePriceEvent(data []byte) error {
@@ -362,10 +377,9 @@ func (s *MarketSubscriber) handleLastTradePriceEvent(data []byte) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.Market, EventTypeLastTradePrice), []LastTradePriceEvent{event})
+	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeLastTradePrice), []LastTradePriceEvent{event})
 }
 
-// Close closes the websocket connection
 func (s *MarketSubscriber) Close() error {
 	if s.conn != nil {
 		err := s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
@@ -377,24 +391,6 @@ func (s *MarketSubscriber) Close() error {
 	return nil
 }
 
-// Done returns a channel that is closed when the subscriber stops
 func (s *MarketSubscriber) Done() <-chan struct{} {
 	return s.done
-}
-
-// SanitizeMarketID removes characters that are invalid for filenames
-func SanitizeMarketID(marketID string) string {
-	// Replace characters that are problematic in filenames
-	replacer := strings.NewReplacer(
-		"/", "_",
-		"\\", "_",
-		":", "_",
-		"*", "_",
-		"?", "_",
-		"\"", "_",
-		"<", "_",
-		">", "_",
-		"|", "_",
-	)
-	return replacer.Replace(marketID)
 }

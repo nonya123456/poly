@@ -21,26 +21,23 @@ func main() {
 		log.Fatalf("failed to get market: %v", err)
 	}
 
-	fmt.Printf("Market ID: %s\n", market.ID)
-	fmt.Printf("Token IDs: %v\n", market.ClobTokenIDs)
+	fmt.Printf("Market: %s\n", market.Question)
+	fmt.Printf("Outcomes: %v\n", market.Outcomes)
 
-	// Create output directory if it doesn't exist
-	outputDir := "data"
+	outputDir := "out"
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		log.Fatalf("failed to create output directory: %v", err)
 	}
 
-	// Subscribe to market websocket
 	subscriber := polymarket.NewMarketSubscriber(outputDir)
 
-	fmt.Printf("Subscribing to market channel for assets: %v\n", market.ClobTokenIDs)
-	if err := subscriber.Subscribe(market.ClobTokenIDs); err != nil {
+	fmt.Printf("Subscribing to market channel...\n")
+	if err := subscriber.Subscribe(market); err != nil {
 		log.Fatalf("failed to subscribe: %v", err)
 	}
 
 	fmt.Println("Listening for market events... Press Ctrl+C to stop.")
 
-	// Wait for interrupt signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 

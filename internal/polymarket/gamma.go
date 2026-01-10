@@ -31,11 +31,17 @@ func NewGammaService(baseURL string) *GammaService {
 
 type MarketResponse struct {
 	ID           string          `json:"id"`
+	Question     string          `json:"question"`
+	Slug         string          `json:"slug"`
+	Outcomes     json.RawMessage `json:"outcomes"`
 	ClobTokenIDs json.RawMessage `json:"clobTokenIds"`
 }
 
 type Market struct {
 	ID           string
+	Question     string
+	Slug         string
+	Outcomes     []string
 	ClobTokenIDs []string
 }
 
@@ -71,6 +77,7 @@ func (s *GammaService) GetMarketBySlug(slug string) (Market, error) {
 	}
 
 	mr := marketsResp[0]
+
 	var tokenIDsStr string
 	if err := json.Unmarshal(mr.ClobTokenIDs, &tokenIDsStr); err != nil {
 		return Market{}, fmt.Errorf("failed to parse token IDs string: %w", err)
@@ -81,8 +88,21 @@ func (s *GammaService) GetMarketBySlug(slug string) (Market, error) {
 		return Market{}, fmt.Errorf("failed to parse token IDs array: %w", err)
 	}
 
+	var outcomesStr string
+	if err := json.Unmarshal(mr.Outcomes, &outcomesStr); err != nil {
+		return Market{}, fmt.Errorf("failed to parse outcomes string: %w", err)
+	}
+
+	var outcomes []string
+	if err := json.Unmarshal([]byte(outcomesStr), &outcomes); err != nil {
+		return Market{}, fmt.Errorf("failed to parse outcomes array: %w", err)
+	}
+
 	return Market{
 		ID:           mr.ID,
+		Question:     mr.Question,
+		Slug:         mr.Slug,
+		Outcomes:     outcomes,
 		ClobTokenIDs: tokenIDs,
 	}, nil
 }
