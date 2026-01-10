@@ -181,12 +181,22 @@ type MarketSubscriber struct {
 	mu        sync.Mutex
 }
 
-func NewMarketSubscriber(outputDir string) *MarketSubscriber {
-	return &MarketSubscriber{
+func NewMarketSubscriber(outputDir string) (*MarketSubscriber, error) {
+	conn, _, err := websocket.DefaultDialer.Dial(WebSocketMarketURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("dial websocket: %w", err)
+	}
+
+	s := &MarketSubscriber{
+		conn:      conn,
 		outputDir: outputDir,
 		tokens:    make(map[string]*TokenMetadata),
 		done:      make(chan struct{}),
 	}
+
+	go s.readLoop()
+
+	return s, nil
 }
 
 type subscribeMessage struct {
@@ -207,25 +217,12 @@ func (s *MarketSubscriber) Subscribe(market Market) error {
 		}
 	}
 
-	conn, _, err := websocket.DefaultDialer.Dial(WebSocketMarketURL, nil)
-	if err != nil {
-		return fmt.Errorf("dial websocket: %w", err)
-	}
-	s.conn = conn
-
 	msg := subscribeMessage{
 		Type:    "subscribe",
 		Channel: "market",
 		Assets:  market.ClobTokenIDs,
 	}
-
-	if err := conn.WriteJSON(msg); err != nil {
-		return fmt.Errorf("send subscribe message: %w", err)
-	}
-
-	go s.readLoop()
-
-	return nil
+	return s.conn.WriteJSON(msg)
 }
 
 func (s *MarketSubscriber) readLoop() {

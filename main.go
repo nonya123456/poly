@@ -29,7 +29,10 @@ func main() {
 		log.Fatalf("failed to create output directory: %v", err)
 	}
 
-	subscriber := polymarket.NewMarketSubscriber(outputDir)
+	subscriber, err := polymarket.NewMarketSubscriber(outputDir)
+	if err != nil {
+		log.Fatalf("failed to create subscriber: %v", err)
+	}
 
 	fmt.Printf("Subscribing to market channel...\n")
 	if err := subscriber.Subscribe(market); err != nil {
