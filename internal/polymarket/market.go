@@ -41,32 +41,20 @@ type BookEvent struct {
 	Asks []BookLevel `json:"asks"`
 }
 
-func (e BookEvent) CSVHeader() []string {
-	return []string{"timestamp", "market", "asset_id", "side", "price", "size"}
-}
-
-func (e BookEvent) CSVRow() []string {
-	return nil
-}
-
 type BookLevelRecord struct {
 	Timestamp string
-	Market    string
-	AssetID   string
 	Side      string
 	Price     string
 	Size      string
 }
 
 func (r BookLevelRecord) CSVHeader() []string {
-	return []string{"timestamp", "market", "asset_id", "side", "price", "size"}
+	return []string{"timestamp", "side", "price", "size"}
 }
 
 func (r BookLevelRecord) CSVRow() []string {
 	return []string{
 		r.Timestamp,
-		r.Market,
-		r.AssetID,
 		r.Side,
 		r.Price,
 		r.Size,
@@ -90,29 +78,23 @@ type PriceChangeEvent struct {
 
 type PriceChangeRecord struct {
 	Timestamp string
-	Market    string
-	AssetID   string
 	Price     string
 	Size      string
 	Side      string
-	Hash      string
 	BestBid   string
 	BestAsk   string
 }
 
 func (r PriceChangeRecord) CSVHeader() []string {
-	return []string{"timestamp", "market", "asset_id", "price", "size", "side", "hash", "best_bid", "best_ask"}
+	return []string{"timestamp", "price", "size", "side", "best_bid", "best_ask"}
 }
 
 func (r PriceChangeRecord) CSVRow() []string {
 	return []string{
 		r.Timestamp,
-		r.Market,
-		r.AssetID,
 		r.Price,
 		r.Size,
 		r.Side,
-		r.Hash,
 		r.BestBid,
 		r.BestAsk,
 	}
@@ -124,17 +106,21 @@ type TickSizeChangeEvent struct {
 	NewTickSize string `json:"new_tick_size"`
 }
 
-func (e TickSizeChangeEvent) CSVHeader() []string {
-	return []string{"timestamp", "market", "asset_id", "old_tick_size", "new_tick_size"}
+type TickSizeChangeRecord struct {
+	Timestamp   string
+	OldTickSize string
+	NewTickSize string
 }
 
-func (e TickSizeChangeEvent) CSVRow() []string {
+func (r TickSizeChangeRecord) CSVHeader() []string {
+	return []string{"timestamp", "old_tick_size", "new_tick_size"}
+}
+
+func (r TickSizeChangeRecord) CSVRow() []string {
 	return []string{
-		e.Timestamp,
-		e.Market,
-		e.AssetID,
-		e.OldTickSize,
-		e.NewTickSize,
+		r.Timestamp,
+		r.OldTickSize,
+		r.NewTickSize,
 	}
 }
 
@@ -146,19 +132,25 @@ type LastTradePriceEvent struct {
 	FeeRateBps string `json:"fee_rate_bps"`
 }
 
-func (e LastTradePriceEvent) CSVHeader() []string {
-	return []string{"timestamp", "market", "asset_id", "price", "size", "side", "fee_rate_bps"}
+type LastTradePriceRecord struct {
+	Timestamp  string
+	Price      string
+	Size       string
+	Side       string
+	FeeRateBps string
 }
 
-func (e LastTradePriceEvent) CSVRow() []string {
+func (r LastTradePriceRecord) CSVHeader() []string {
+	return []string{"timestamp", "price", "size", "side", "fee_rate_bps"}
+}
+
+func (r LastTradePriceRecord) CSVRow() []string {
 	return []string{
-		e.Timestamp,
-		e.Market,
-		e.AssetID,
-		e.Price,
-		e.Size,
-		e.Side,
-		e.FeeRateBps,
+		r.Timestamp,
+		r.Price,
+		r.Size,
+		r.Side,
+		r.FeeRateBps,
 	}
 }
 
@@ -302,8 +294,6 @@ func (s *MarketSubscriber) handleBookEvent(data []byte) error {
 	for _, bid := range event.Bids {
 		records = append(records, BookLevelRecord{
 			Timestamp: event.Timestamp,
-			Market:    event.Market,
-			AssetID:   event.AssetID,
 			Side:      "BID",
 			Price:     bid.Price,
 			Size:      bid.Size,
@@ -313,8 +303,6 @@ func (s *MarketSubscriber) handleBookEvent(data []byte) error {
 	for _, ask := range event.Asks {
 		records = append(records, BookLevelRecord{
 			Timestamp: event.Timestamp,
-			Market:    event.Market,
-			AssetID:   event.AssetID,
 			Side:      "ASK",
 			Price:     ask.Price,
 			Size:      ask.Size,
@@ -336,12 +324,9 @@ func (s *MarketSubscriber) handlePriceChangeEvent(data []byte) error {
 	for _, change := range event.Changes {
 		record := PriceChangeRecord{
 			Timestamp: event.Timestamp,
-			Market:    event.Market,
-			AssetID:   change.AssetID,
 			Price:     change.Price,
 			Size:      change.Size,
 			Side:      change.Side,
-			Hash:      change.Hash,
 			BestBid:   change.BestBid,
 			BestAsk:   change.BestAsk,
 		}
@@ -364,9 +349,15 @@ func (s *MarketSubscriber) handleTickSizeChangeEvent(data []byte) error {
 		return fmt.Errorf("unmarshal tick_size_change event: %w", err)
 	}
 
+	record := TickSizeChangeRecord{
+		Timestamp:   event.Timestamp,
+		OldTickSize: event.OldTickSize,
+		NewTickSize: event.NewTickSize,
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeTickSizeChange), []TickSizeChangeEvent{event})
+	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeTickSizeChange), []TickSizeChangeRecord{record})
 }
 
 func (s *MarketSubscriber) handleLastTradePriceEvent(data []byte) error {
@@ -375,9 +366,17 @@ func (s *MarketSubscriber) handleLastTradePriceEvent(data []byte) error {
 		return fmt.Errorf("unmarshal last_trade_price event: %w", err)
 	}
 
+	record := LastTradePriceRecord{
+		Timestamp:  event.Timestamp,
+		Price:      event.Price,
+		Size:       event.Size,
+		Side:       event.Side,
+		FeeRateBps: event.FeeRateBps,
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeLastTradePrice), []LastTradePriceEvent{event})
+	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeLastTradePrice), []LastTradePriceRecord{record})
 }
 
 func (s *MarketSubscriber) Close() error {
