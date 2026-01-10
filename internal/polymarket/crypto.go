@@ -64,6 +64,8 @@ type CryptoSubscriber struct {
 	done       chan struct{}
 	mu         sync.Mutex
 	pingStop   chan struct{}
+	closeCh    chan struct{} // signals intentional close
+	connMu     sync.Mutex    // protects conn during reconnect
 }
 
 func NewCryptoSubscriber(outputDir string) (*CryptoSubscriber, error) {
@@ -78,12 +80,86 @@ func NewCryptoSubscriber(outputDir string) (*CryptoSubscriber, error) {
 		symbols:   make(map[string]struct{}),
 		done:      make(chan struct{}),
 		pingStop:  make(chan struct{}),
+		closeCh:   make(chan struct{}),
 	}
 
 	go s.pingLoop()
 	go s.readLoop()
 
 	return s, nil
+}
+
+func (s *CryptoSubscriber) reconnect() error {
+	const (
+		maxRetries     = 10
+		initialBackoff = 1 * time.Second
+		maxBackoff     = 60 * time.Second
+	)
+
+	backoff := initialBackoff
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		select {
+		case <-s.closeCh:
+			return fmt.Errorf("subscriber closed during reconnect")
+		default:
+		}
+
+		log.Printf("crypto: reconnect attempt %d/%d (backoff: %v)", attempt, maxRetries, backoff)
+
+		conn, _, err := websocket.DefaultDialer.Dial(WebSocketRTDSURL, nil)
+		if err != nil {
+			log.Printf("crypto: reconnect failed: %v", err)
+			time.Sleep(backoff)
+			backoff = time.Duration(float64(backoff) * 2)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		s.connMu.Lock()
+		s.conn = conn
+		s.connMu.Unlock()
+
+		if err := s.resubscribe(); err != nil {
+			log.Printf("crypto: resubscribe failed: %v", err)
+			conn.Close()
+			time.Sleep(backoff)
+			backoff = time.Duration(float64(backoff) * 2)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		log.Printf("crypto: reconnected successfully")
+		return nil
+	}
+	return fmt.Errorf("crypto: max reconnect attempts (%d) exceeded", maxRetries)
+}
+
+func (s *CryptoSubscriber) resubscribe() error {
+	s.mu.Lock()
+	symbols := make([]string, 0, len(s.symbols))
+	for sym := range s.symbols {
+		symbols = append(symbols, sym)
+	}
+	s.mu.Unlock()
+
+	if len(symbols) == 0 {
+		return nil
+	}
+
+	msg := rtdsMessage{
+		Action: "subscribe",
+		Subscriptions: []rtdsSubscription{
+			{
+				Topic: "crypto_prices",
+				Type:  "update",
+			},
+		},
+	}
+	return s.conn.WriteJSON(msg)
 }
 
 func (s *CryptoSubscriber) pingLoop() {
@@ -93,9 +169,11 @@ func (s *CryptoSubscriber) pingLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := s.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			s.connMu.Lock()
+			conn := s.conn
+			s.connMu.Unlock()
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				log.Printf("ping error: %v", err)
-				return
 			}
 		case <-s.pingStop:
 			return
@@ -152,13 +230,29 @@ func (s *CryptoSubscriber) readLoop() {
 	defer close(s.done)
 
 	for {
-		_, message, err := s.conn.ReadMessage()
+		s.connMu.Lock()
+		conn := s.conn
+		s.connMu.Unlock()
+
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 				return
 			}
-			log.Printf("read error: %v", err)
-			return
+
+			select {
+			case <-s.closeCh:
+				return
+			default:
+			}
+
+			log.Printf("crypto: read error: %v", err)
+
+			if err := s.reconnect(); err != nil {
+				log.Printf("crypto: reconnect failed permanently: %v", err)
+				return
+			}
+			continue
 		}
 
 		if err := s.handleMessage(message); err != nil {
@@ -212,14 +306,19 @@ func (s *CryptoSubscriber) handlePriceEvent(event CryptoPriceEvent) error {
 }
 
 func (s *CryptoSubscriber) Close() error {
+	close(s.closeCh)
 	close(s.pingStop)
 
-	if s.conn != nil {
-		err := s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	s.connMu.Lock()
+	conn := s.conn
+	s.connMu.Unlock()
+
+	if conn != nil {
+		err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		if err != nil {
 			return fmt.Errorf("send close message: %w", err)
 		}
-		return s.conn.Close()
+		return conn.Close()
 	}
 	return nil
 }

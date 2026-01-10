@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/nonya123456/poly/internal/util"
@@ -180,6 +181,8 @@ type MarketSubscriber struct {
 	tokens    map[string]TokenMetadata
 	done      chan struct{}
 	mu        sync.Mutex
+	closeCh   chan struct{} // signals intentional close
+	connMu    sync.Mutex    // protects conn during reconnect
 }
 
 func NewMarketSubscriber(outputDir string) (*MarketSubscriber, error) {
@@ -193,11 +196,86 @@ func NewMarketSubscriber(outputDir string) (*MarketSubscriber, error) {
 		outputDir: outputDir,
 		tokens:    make(map[string]TokenMetadata),
 		done:      make(chan struct{}),
+		closeCh:   make(chan struct{}),
 	}
 
 	go s.readLoop()
 
 	return s, nil
+}
+
+func (s *MarketSubscriber) reconnect() error {
+	const (
+		maxRetries     = 10
+		initialBackoff = 1 * time.Second
+		maxBackoff     = 60 * time.Second
+	)
+
+	backoff := initialBackoff
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		select {
+		case <-s.closeCh:
+			return fmt.Errorf("subscriber closed during reconnect")
+		default:
+		}
+
+		log.Printf("market: reconnect attempt %d/%d (backoff: %v)", attempt, maxRetries, backoff)
+
+		conn, _, err := websocket.DefaultDialer.Dial(WebSocketMarketURL, nil)
+		if err != nil {
+			log.Printf("market: reconnect failed: %v", err)
+			time.Sleep(backoff)
+			backoff = time.Duration(float64(backoff) * 2)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		s.connMu.Lock()
+		s.conn = conn
+		s.connMu.Unlock()
+
+		if err := s.resubscribe(); err != nil {
+			log.Printf("market: resubscribe failed: %v", err)
+			conn.Close()
+			time.Sleep(backoff)
+			backoff = time.Duration(float64(backoff) * 2)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		log.Printf("market: reconnected successfully")
+		return nil
+	}
+	return fmt.Errorf("market: max reconnect attempts (%d) exceeded", maxRetries)
+}
+
+func (s *MarketSubscriber) resubscribe() error {
+	s.mu.Lock()
+	tokens := make([]TokenMetadata, 0, len(s.tokens))
+	for _, token := range s.tokens {
+		tokens = append(tokens, token)
+	}
+	s.mu.Unlock()
+
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	assets := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		assets = append(assets, token.ID)
+	}
+
+	msg := subscribeMessage{
+		Type:      "MARKET",
+		Operation: "subscribe",
+		Assets:    assets,
+	}
+	return s.conn.WriteJSON(msg)
 }
 
 type subscribeMessage struct {
@@ -240,13 +318,29 @@ func (s *MarketSubscriber) readLoop() {
 	defer close(s.done)
 
 	for {
-		_, message, err := s.conn.ReadMessage()
+		s.connMu.Lock()
+		conn := s.conn
+		s.connMu.Unlock()
+
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 				return
 			}
-			log.Printf("read error: %v", err)
-			return
+
+			select {
+			case <-s.closeCh:
+				return
+			default:
+			}
+
+			log.Printf("market: read error: %v", err)
+
+			if err := s.reconnect(); err != nil {
+				log.Printf("market: reconnect failed permanently: %v", err)
+				return
+			}
+			continue
 		}
 
 		if err := s.handleMessage(message); err != nil {
@@ -413,12 +507,18 @@ func (s *MarketSubscriber) handleLastTradePriceEvent(data []byte) error {
 }
 
 func (s *MarketSubscriber) Close() error {
-	if s.conn != nil {
-		err := s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	close(s.closeCh)
+
+	s.connMu.Lock()
+	conn := s.conn
+	s.connMu.Unlock()
+
+	if conn != nil {
+		err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		if err != nil {
 			return fmt.Errorf("send close message: %w", err)
 		}
-		return s.conn.Close()
+		return conn.Close()
 	}
 	return nil
 }
