@@ -25,6 +25,17 @@ func main() {
 		log.Fatalf("failed to create subscriber: %v", err)
 	}
 
+	cryptoSubscriber, err := polymarket.NewCryptoSubscriber(outputDir)
+	if err != nil {
+		log.Fatalf("failed to create crypto subscriber: %v", err)
+	}
+
+	// Subscribe to BTC price from RTDS
+	fmt.Println("Subscribing to BTC price feed...")
+	if err := cryptoSubscriber.Subscribe([]string{"btcusdt"}); err != nil {
+		log.Fatalf("failed to subscribe to crypto prices: %v", err)
+	}
+
 	currentSlug := polymarket.GetCurrentBTCMarketSlug()
 	fmt.Printf("Fetching market: %s\n", currentSlug)
 
@@ -42,6 +53,9 @@ func main() {
 		log.Fatalf("failed to subscribe: %v", err)
 	}
 
+	// Set market slug for crypto subscriber
+	cryptoSubscriber.SetMarketSlug(market.Slug)
+
 	fmt.Println("Listening for market events... Press Ctrl+C to stop.")
 
 	sigCh := make(chan os.Signal, 1)
@@ -54,12 +68,18 @@ func main() {
 		select {
 		case <-sigCh:
 			fmt.Println("\nShutting down...")
+			if err := cryptoSubscriber.Close(); err != nil {
+				log.Printf("error closing crypto subscriber: %v", err)
+			}
 			if err := subscriber.Close(); err != nil {
 				log.Printf("error closing subscriber: %v", err)
 			}
 			return
+		case <-cryptoSubscriber.Done():
+			fmt.Println("\nCrypto websocket connection closed.")
+			return
 		case <-subscriber.Done():
-			fmt.Println("\nWebsocket connection closed.")
+			fmt.Println("\nMarket websocket connection closed.")
 			return
 		case <-ticker.C:
 			newSlug := polymarket.GetCurrentBTCMarketSlug()
@@ -89,6 +109,7 @@ func main() {
 
 			currentSlug = newSlug
 			currentTokens = newTokens
+			cryptoSubscriber.SetMarketSlug(newMarket.Slug)
 			fmt.Println("Listening for market events...")
 		}
 	}
