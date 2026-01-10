@@ -201,9 +201,9 @@ func NewMarketSubscriber(outputDir string) (*MarketSubscriber, error) {
 }
 
 type subscribeMessage struct {
-	Type    string   `json:"type"`
-	Channel string   `json:"channel"`
-	Assets  []string `json:"assets_ids"`
+	Type      string   `json:"type"`
+	Operation string   `json:"operation"`
+	Assets    []string `json:"assets_ids"`
 }
 
 func (s *MarketSubscriber) Subscribe(tokens []TokenMetadata) error {
@@ -214,9 +214,24 @@ func (s *MarketSubscriber) Subscribe(tokens []TokenMetadata) error {
 	}
 
 	msg := subscribeMessage{
-		Type:    "subscribe",
-		Channel: "market",
-		Assets:  assets,
+		Type:      "MARKET",
+		Operation: "subscribe",
+		Assets:    assets,
+	}
+	return s.conn.WriteJSON(msg)
+}
+
+func (s *MarketSubscriber) Unsubscribe(tokens []TokenMetadata) error {
+	assets := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		delete(s.tokens, token.ID)
+		assets = append(assets, token.ID)
+	}
+
+	msg := subscribeMessage{
+		Type:      "MARKET",
+		Operation: "unsubscribe",
+		Assets:    assets,
 	}
 	return s.conn.WriteJSON(msg)
 }
@@ -241,7 +256,14 @@ func (s *MarketSubscriber) readLoop() {
 }
 
 func (s *MarketSubscriber) handleMessage(data []byte) error {
-	if len(data) > 0 && data[0] == '[' {
+	if len(data) == 0 {
+		return nil
+	}
+	// Skip non-JSON messages (text responses like acknowledgments)
+	if data[0] != '[' && data[0] != '{' {
+		return nil
+	}
+	if data[0] == '[' {
 		var events []json.RawMessage
 		if err := json.Unmarshal(data, &events); err != nil {
 			return fmt.Errorf("unmarshal event array: %w", err)
@@ -278,16 +300,13 @@ func (s *MarketSubscriber) handleSingleEvent(data []byte) error {
 }
 
 func (s *MarketSubscriber) csvPath(assetID string, eventType EventType) (string, bool) {
-	slug := "unknown"
-	outcomeName := "unknown"
-
 	meta, ok := s.tokens[assetID]
 	if !ok {
 		return "", false
 	}
 
-	slug = strings.ToLower(meta.MarketSlug)
-	outcomeName = strings.ToLower(meta.OutcomeName)
+	slug := strings.ToLower(meta.MarketSlug)
+	outcomeName := strings.ToLower(meta.OutcomeName)
 	filename := fmt.Sprintf("%s_%s_%s.csv", slug, outcomeName, eventType)
 	return filepath.Join(s.outputDir, filename), true
 }
