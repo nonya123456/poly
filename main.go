@@ -30,10 +30,21 @@ func main() {
 		log.Fatalf("failed to create crypto subscriber: %v", err)
 	}
 
+	chainlinkSubscriber, err := polymarket.NewChainlinkSubscriber(outputDir)
+	if err != nil {
+		log.Fatalf("failed to create chainlink subscriber: %v", err)
+	}
+
 	// Subscribe to BTC price from RTDS
 	fmt.Println("Subscribing to BTC price feed...")
 	if err := cryptoSubscriber.Subscribe([]string{"btcusdt"}); err != nil {
 		log.Fatalf("failed to subscribe to crypto prices: %v", err)
+	}
+
+	// Subscribe to BTC price from Chainlink
+	fmt.Println("Subscribing to Chainlink BTC price feed...")
+	if err := chainlinkSubscriber.Subscribe([]string{"btc/usd"}); err != nil {
+		log.Fatalf("failed to subscribe to chainlink prices: %v", err)
 	}
 
 	currentSlug := polymarket.GetCurrentBTCMarketSlug()
@@ -53,8 +64,9 @@ func main() {
 		log.Fatalf("failed to subscribe: %v", err)
 	}
 
-	// Set market slug for crypto subscriber
+	// Set market slug for crypto subscribers
 	cryptoSubscriber.SetMarketSlug(market.Slug)
+	chainlinkSubscriber.SetMarketSlug(market.Slug)
 
 	fmt.Println("Listening for market events... Press Ctrl+C to stop.")
 
@@ -68,12 +80,18 @@ func main() {
 		select {
 		case <-sigCh:
 			fmt.Println("\nShutting down...")
+			if err := chainlinkSubscriber.Close(); err != nil {
+				log.Printf("error closing chainlink subscriber: %v", err)
+			}
 			if err := cryptoSubscriber.Close(); err != nil {
 				log.Printf("error closing crypto subscriber: %v", err)
 			}
 			if err := subscriber.Close(); err != nil {
 				log.Printf("error closing subscriber: %v", err)
 			}
+			return
+		case <-chainlinkSubscriber.Done():
+			fmt.Println("\nChainlink websocket connection closed.")
 			return
 		case <-cryptoSubscriber.Done():
 			fmt.Println("\nCrypto websocket connection closed.")
@@ -110,6 +128,7 @@ func main() {
 			currentSlug = newSlug
 			currentTokens = newTokens
 			cryptoSubscriber.SetMarketSlug(newMarket.Slug)
+			chainlinkSubscriber.SetMarketSlug(newMarket.Slug)
 			fmt.Println("Listening for market events...")
 		}
 	}
