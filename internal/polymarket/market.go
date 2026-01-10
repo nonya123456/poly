@@ -41,23 +41,37 @@ type BookEvent struct {
 	Asks []BookLevel `json:"asks"`
 }
 
-type BookLevelRecord struct {
+type BookRecord struct {
 	Timestamp string
-	Side      string
-	Price     string
-	Size      string
+	Bids      []BookLevel
+	Asks      []BookLevel
 }
 
-func (r BookLevelRecord) CSVHeader() []string {
-	return []string{"timestamp", "side", "price", "size"}
+func (r BookRecord) CSVHeader() []string {
+	return []string{"timestamp", "bids", "asks"}
 }
 
-func (r BookLevelRecord) CSVRow() []string {
+func (r BookRecord) CSVRow() []string {
+	bb := strings.Builder{}
+	for _, bid := range r.Bids {
+		_, _ = bb.WriteString(bid.Price)
+		_, _ = bb.WriteString(" ")
+		_, _ = bb.WriteString(bid.Size)
+		_, _ = bb.WriteString(" ")
+	}
+
+	ab := strings.Builder{}
+	for _, ask := range r.Asks {
+		_, _ = ab.WriteString(ask.Price)
+		_, _ = ab.WriteString(" ")
+		_, _ = ab.WriteString(ask.Size)
+		_, _ = ab.WriteString(" ")
+	}
+
 	return []string{
 		r.Timestamp,
-		r.Side,
-		r.Price,
-		r.Size,
+		strings.Trim(bb.String(), " "),
+		strings.Trim(ab.String(), " "),
 	}
 }
 
@@ -289,29 +303,16 @@ func (s *MarketSubscriber) handleBookEvent(data []byte) error {
 		return fmt.Errorf("unmarshal book event: %w", err)
 	}
 
-	var records []BookLevelRecord
-
-	for _, bid := range event.Bids {
-		records = append(records, BookLevelRecord{
-			Timestamp: event.Timestamp,
-			Side:      "BID",
-			Price:     bid.Price,
-			Size:      bid.Size,
-		})
-	}
-
-	for _, ask := range event.Asks {
-		records = append(records, BookLevelRecord{
-			Timestamp: event.Timestamp,
-			Side:      "ASK",
-			Price:     ask.Price,
-			Size:      ask.Size,
-		})
+	record := BookRecord{
+		Timestamp: event.Timestamp,
+		Bids:      event.Bids,
+		Asks:      event.Asks,
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeBook), records)
+
+	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeBook), []BookRecord{record})
 }
 
 func (s *MarketSubscriber) handlePriceChangeEvent(data []byte) error {
