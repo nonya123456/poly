@@ -169,6 +169,7 @@ func (r LastTradePriceRecord) CSVRow() []string {
 }
 
 type TokenMetadata struct {
+	ID          string
 	MarketSlug  string
 	OutcomeName string
 }
@@ -176,7 +177,7 @@ type TokenMetadata struct {
 type MarketSubscriber struct {
 	conn      *websocket.Conn
 	outputDir string
-	tokens    map[string]*TokenMetadata
+	tokens    map[string]TokenMetadata
 	done      chan struct{}
 	mu        sync.Mutex
 }
@@ -190,7 +191,7 @@ func NewMarketSubscriber(outputDir string) (*MarketSubscriber, error) {
 	s := &MarketSubscriber{
 		conn:      conn,
 		outputDir: outputDir,
-		tokens:    make(map[string]*TokenMetadata),
+		tokens:    make(map[string]TokenMetadata),
 		done:      make(chan struct{}),
 	}
 
@@ -205,22 +206,17 @@ type subscribeMessage struct {
 	Assets  []string `json:"assets_ids"`
 }
 
-func (s *MarketSubscriber) Subscribe(market Market) error {
-	for i, tokenID := range market.ClobTokenIDs {
-		outcomeName := "unknown"
-		if i < len(market.Outcomes) {
-			outcomeName = market.Outcomes[i]
-		}
-		s.tokens[tokenID] = &TokenMetadata{
-			MarketSlug:  market.Slug,
-			OutcomeName: outcomeName,
-		}
+func (s *MarketSubscriber) Subscribe(tokens []TokenMetadata) error {
+	assets := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		s.tokens[token.ID] = token
+		assets = append(assets, token.ID)
 	}
 
 	msg := subscribeMessage{
 		Type:    "subscribe",
 		Channel: "market",
-		Assets:  market.ClobTokenIDs,
+		Assets:  assets,
 	}
 	return s.conn.WriteJSON(msg)
 }
@@ -281,17 +277,19 @@ func (s *MarketSubscriber) handleSingleEvent(data []byte) error {
 	}
 }
 
-func (s *MarketSubscriber) csvPath(assetID string, eventType EventType) string {
+func (s *MarketSubscriber) csvPath(assetID string, eventType EventType) (string, bool) {
 	slug := "unknown"
 	outcomeName := "unknown"
 
-	if meta, ok := s.tokens[assetID]; ok {
-		slug = strings.ToLower(meta.MarketSlug)
-		outcomeName = strings.ToLower(meta.OutcomeName)
+	meta, ok := s.tokens[assetID]
+	if !ok {
+		return "", false
 	}
 
+	slug = strings.ToLower(meta.MarketSlug)
+	outcomeName = strings.ToLower(meta.OutcomeName)
 	filename := fmt.Sprintf("%s_%s_%s.csv", slug, outcomeName, eventType)
-	return filepath.Join(s.outputDir, filename)
+	return filepath.Join(s.outputDir, filename), true
 }
 
 func (s *MarketSubscriber) handleBookEvent(data []byte) error {
@@ -309,7 +307,11 @@ func (s *MarketSubscriber) handleBookEvent(data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeBook), []BookRecord{record})
+	path, ok := s.csvPath(event.AssetID, EventTypeBook)
+	if !ok {
+		return nil // ignore
+	}
+	return util.AppendCSV(path, []BookRecord{record})
 }
 
 func (s *MarketSubscriber) handlePriceChangeEvent(data []byte) error {
@@ -334,7 +336,11 @@ func (s *MarketSubscriber) handlePriceChangeEvent(data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for assetID, records := range recordsByAsset {
-		if err := util.AppendCSV(s.csvPath(assetID, EventTypePriceChange), records); err != nil {
+		path, ok := s.csvPath(assetID, EventTypePriceChange)
+		if !ok {
+			continue // ignore
+		}
+		if err := util.AppendCSV(path, records); err != nil {
 			return err
 		}
 	}
@@ -355,7 +361,12 @@ func (s *MarketSubscriber) handleTickSizeChangeEvent(data []byte) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeTickSizeChange), []TickSizeChangeRecord{record})
+
+	path, ok := s.csvPath(event.AssetID, EventTypeTickSizeChange)
+	if !ok {
+		return nil // ignore
+	}
+	return util.AppendCSV(path, []TickSizeChangeRecord{record})
 }
 
 func (s *MarketSubscriber) handleLastTradePriceEvent(data []byte) error {
@@ -374,7 +385,12 @@ func (s *MarketSubscriber) handleLastTradePriceEvent(data []byte) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return util.AppendCSV(s.csvPath(event.AssetID, EventTypeLastTradePrice), []LastTradePriceRecord{record})
+
+	path, ok := s.csvPath(event.AssetID, EventTypeLastTradePrice)
+	if !ok {
+		return nil // ignore
+	}
+	return util.AppendCSV(path, []LastTradePriceRecord{record})
 }
 
 func (s *MarketSubscriber) Close() error {

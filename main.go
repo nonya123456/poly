@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/nonya123456/poly/internal/polymarket"
@@ -35,7 +36,8 @@ func main() {
 	}
 
 	fmt.Printf("Subscribing to market channel...\n")
-	if err := subscriber.Subscribe(market); err != nil {
+	tokens := getTokenMetadataByOutcome(market, "up")
+	if err := subscriber.Subscribe(tokens); err != nil {
 		log.Fatalf("failed to subscribe: %v", err)
 	}
 
@@ -54,4 +56,22 @@ func main() {
 	if err := subscriber.Close(); err != nil {
 		log.Printf("error closing subscriber: %v", err)
 	}
+}
+
+func getTokenMetadataByOutcome(market polymarket.Market, want string) []polymarket.TokenMetadata {
+	tokens := make([]polymarket.TokenMetadata, 0)
+	for i, outcome := range market.Outcomes {
+		if i >= len(market.ClobTokenIDs) {
+			break
+		}
+		if strings.Compare(strings.ToLower(outcome), strings.ToLower(want)) != 0 {
+			continue
+		}
+		tokens = append(tokens, polymarket.TokenMetadata{
+			ID:          market.ClobTokenIDs[i],
+			MarketSlug:  market.Slug,
+			OutcomeName: outcome,
+		})
+	}
+	return tokens
 }
