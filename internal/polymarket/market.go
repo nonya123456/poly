@@ -176,13 +176,14 @@ type TokenMetadata struct {
 }
 
 type MarketSubscriber struct {
-	conn      *websocket.Conn
-	outputDir string
-	tokens    map[string]TokenMetadata
-	done      chan struct{}
-	mu        sync.Mutex
-	closeCh   chan struct{} // signals intentional close
-	connMu    sync.Mutex    // protects conn during reconnect
+	conn        *websocket.Conn
+	outputDir   string
+	tokens      map[string]TokenMetadata
+	done        chan struct{}
+	mu          sync.Mutex
+	closeCh     chan struct{} // signals intentional close
+	connMu      sync.Mutex    // protects conn during reconnect
+	reconnectMu sync.Mutex    // prevents concurrent reconnects
 }
 
 func NewMarketSubscriber(outputDir string) (*MarketSubscriber, error) {
@@ -238,7 +239,7 @@ func (s *MarketSubscriber) reconnect() error {
 
 		if err := s.resubscribe(); err != nil {
 			log.Printf("market: resubscribe failed: %v", err)
-			conn.Close()
+			_ = conn.Close()
 			time.Sleep(backoff)
 			backoff = time.Duration(float64(backoff) * 2)
 			if backoff > maxBackoff {
@@ -275,7 +276,7 @@ func (s *MarketSubscriber) resubscribe() error {
 		Operation: "subscribe",
 		Assets:    assets,
 	}
-	return s.conn.WriteJSON(msg)
+	return s.writeJSON(msg)
 }
 
 type subscribeMessage struct {
@@ -284,34 +285,44 @@ type subscribeMessage struct {
 	Assets    []string `json:"assets_ids"`
 }
 
+func (s *MarketSubscriber) writeJSON(msg interface{}) error {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conn.WriteJSON(msg)
+}
+
 func (s *MarketSubscriber) Subscribe(tokens []TokenMetadata) error {
+	s.mu.Lock()
 	assets := make([]string, 0, len(tokens))
 	for _, token := range tokens {
 		s.tokens[token.ID] = token
 		assets = append(assets, token.ID)
 	}
+	s.mu.Unlock()
 
 	msg := subscribeMessage{
 		Type:      "MARKET",
 		Operation: "subscribe",
 		Assets:    assets,
 	}
-	return s.conn.WriteJSON(msg)
+	return s.writeJSON(msg)
 }
 
 func (s *MarketSubscriber) Unsubscribe(tokens []TokenMetadata) error {
+	s.mu.Lock()
 	assets := make([]string, 0, len(tokens))
 	for _, token := range tokens {
 		delete(s.tokens, token.ID)
 		assets = append(assets, token.ID)
 	}
+	s.mu.Unlock()
 
 	msg := subscribeMessage{
 		Type:      "MARKET",
 		Operation: "unsubscribe",
 		Assets:    assets,
 	}
-	return s.conn.WriteJSON(msg)
+	return s.writeJSON(msg)
 }
 
 func (s *MarketSubscriber) readLoop() {
@@ -510,15 +521,11 @@ func (s *MarketSubscriber) Close() error {
 	close(s.closeCh)
 
 	s.connMu.Lock()
-	conn := s.conn
-	s.connMu.Unlock()
+	defer s.connMu.Unlock()
 
-	if conn != nil {
-		err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		if err != nil {
-			return fmt.Errorf("send close message: %w", err)
-		}
-		return conn.Close()
+	if s.conn != nil {
+		_ = s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		return s.conn.Close()
 	}
 	return nil
 }
