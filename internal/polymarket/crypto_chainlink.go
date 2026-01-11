@@ -34,7 +34,6 @@ type ChainlinkSubscriber struct {
 	symbols    map[string]struct{} // stores symbols like "btc/usd"
 	done       chan struct{}
 	mu         sync.Mutex
-	pingStop   chan struct{}
 	closeCh    chan struct{}
 	connMu     sync.Mutex
 }
@@ -50,12 +49,12 @@ func NewChainlinkSubscriber(outputDir string) (*ChainlinkSubscriber, error) {
 		outputDir: outputDir,
 		symbols:   make(map[string]struct{}),
 		done:      make(chan struct{}),
-		pingStop:  make(chan struct{}),
 		closeCh:   make(chan struct{}),
 	}
 
 	go s.pingLoop()
 	go s.readLoop()
+	go s.reconnectLoop()
 
 	return s, nil
 }
@@ -146,7 +145,32 @@ func (s *ChainlinkSubscriber) pingLoop() {
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				log.Printf("chainlink ping error: %v", err)
 			}
-		case <-s.pingStop:
+		case <-s.closeCh:
+			return
+		}
+	}
+}
+
+func (s *ChainlinkSubscriber) reconnectLoop() {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("chainlink: periodic reconnect starting")
+			s.connMu.Lock()
+			oldConn := s.conn
+			s.connMu.Unlock()
+			if oldConn != nil {
+				oldConn.Close()
+			}
+			if err := s.reconnect(); err != nil {
+				log.Printf("chainlink: periodic reconnect failed: %v", err)
+			} else {
+				log.Printf("chainlink: periodic reconnect successful")
+			}
+		case <-s.closeCh:
 			return
 		}
 	}
@@ -283,7 +307,6 @@ func (s *ChainlinkSubscriber) handlePriceEvent(event ChainlinkPriceEvent) error 
 
 func (s *ChainlinkSubscriber) Close() error {
 	close(s.closeCh)
-	close(s.pingStop)
 
 	s.connMu.Lock()
 	conn := s.conn

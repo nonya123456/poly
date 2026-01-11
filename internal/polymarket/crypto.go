@@ -63,9 +63,8 @@ type CryptoSubscriber struct {
 	symbols    map[string]struct{}
 	done       chan struct{}
 	mu         sync.Mutex
-	pingStop   chan struct{}
-	closeCh    chan struct{} // signals intentional close
-	connMu     sync.Mutex    // protects conn during reconnect
+	closeCh    chan struct{}
+	connMu     sync.Mutex
 }
 
 func NewCryptoSubscriber(outputDir string) (*CryptoSubscriber, error) {
@@ -79,12 +78,12 @@ func NewCryptoSubscriber(outputDir string) (*CryptoSubscriber, error) {
 		outputDir: outputDir,
 		symbols:   make(map[string]struct{}),
 		done:      make(chan struct{}),
-		pingStop:  make(chan struct{}),
 		closeCh:   make(chan struct{}),
 	}
 
 	go s.pingLoop()
 	go s.readLoop()
+	go s.reconnectLoop()
 
 	return s, nil
 }
@@ -173,9 +172,34 @@ func (s *CryptoSubscriber) pingLoop() {
 			conn := s.conn
 			s.connMu.Unlock()
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("ping error: %v", err)
+				log.Printf("crypto ping error: %v", err)
 			}
-		case <-s.pingStop:
+		case <-s.closeCh:
+			return
+		}
+	}
+}
+
+func (s *CryptoSubscriber) reconnectLoop() {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("crypto: periodic reconnect starting")
+			s.connMu.Lock()
+			oldConn := s.conn
+			s.connMu.Unlock()
+			if oldConn != nil {
+				oldConn.Close()
+			}
+			if err := s.reconnect(); err != nil {
+				log.Printf("crypto: periodic reconnect failed: %v", err)
+			} else {
+				log.Printf("crypto: periodic reconnect successful")
+			}
+		case <-s.closeCh:
 			return
 		}
 	}
@@ -307,7 +331,6 @@ func (s *CryptoSubscriber) handlePriceEvent(event CryptoPriceEvent) error {
 
 func (s *CryptoSubscriber) Close() error {
 	close(s.closeCh)
-	close(s.pingStop)
 
 	s.connMu.Lock()
 	conn := s.conn
