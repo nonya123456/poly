@@ -177,13 +177,12 @@ type TokenMetadata struct {
 
 type MarketSubscriber struct {
 	conn        *websocket.Conn
-	outputDir   string
-	tokens      map[string]TokenMetadata
-	done        chan struct{}
-	mu          sync.Mutex
-	closeCh     chan struct{} // signals intentional close
-	connMu      sync.Mutex    // protects conn during reconnect
-	reconnectMu sync.Mutex    // prevents concurrent reconnects
+	outputDir string
+	tokens    map[string]TokenMetadata
+	done      chan struct{}
+	mu        sync.Mutex
+	closeCh   chan struct{} // signals intentional close
+	connMu    sync.Mutex    // protects conn during reconnect
 }
 
 func NewMarketSubscriber(outputDir string) (*MarketSubscriber, error) {

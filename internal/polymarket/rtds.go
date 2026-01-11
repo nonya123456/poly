@@ -54,20 +54,22 @@ func (r PriceRecord) CSVRow() []string {
 }
 
 type PriceSubscriber struct {
-	conn         *websocket.Conn
-	outputDir    string
-	marketSlug   string
-	symbols      map[string]struct{}
-	done         chan struct{}
-	closeCh      chan struct{}
-	connMu       sync.Mutex
-	mu           sync.Mutex
-	reconnectMu  sync.Mutex
-	pongCh       chan struct{}
-	name         string
-	topic        string
-	topicType    string
-	filePrefix   string
+	conn        *websocket.Conn
+	outputDir   string
+	marketSlug  string
+	symbols     map[string]struct{}
+	done        chan struct{}
+	closeCh     chan struct{}
+	closeOnce   sync.Once
+	connMu      sync.Mutex
+	mu          sync.Mutex
+	reconnectMu sync.Mutex
+	pongCh      chan struct{}
+	reconnectCh chan struct{}
+	name        string
+	topic       string
+	topicType   string
+	filePrefix  string
 }
 
 type PriceSubscriberConfig struct {
@@ -84,16 +86,17 @@ func NewPriceSubscriber(outputDir string, cfg PriceSubscriberConfig) (*PriceSubs
 	}
 
 	s := &PriceSubscriber{
-		conn:       conn,
-		outputDir:  outputDir,
-		symbols:    make(map[string]struct{}),
-		done:       make(chan struct{}),
-		closeCh:    make(chan struct{}),
-		pongCh:     make(chan struct{}, 1),
-		name:       cfg.Name,
-		topic:      cfg.Topic,
-		topicType:  cfg.TopicType,
-		filePrefix: cfg.FilePrefix,
+		conn:        conn,
+		outputDir:   outputDir,
+		symbols:     make(map[string]struct{}),
+		done:        make(chan struct{}),
+		closeCh:     make(chan struct{}),
+		pongCh:      make(chan struct{}, 1),
+		reconnectCh: make(chan struct{}, 1),
+		name:        cfg.Name,
+		topic:       cfg.Topic,
+		topicType:   cfg.TopicType,
+		filePrefix:  cfg.FilePrefix,
 	}
 
 	conn.SetPongHandler(s.pongHandler)
@@ -234,6 +237,13 @@ func (s *PriceSubscriber) triggerReconnect() {
 
 	if err := s.reconnect(); err != nil {
 		log.Printf("%s: reconnect failed: %v", s.name, err)
+		s.closeOnce.Do(func() { close(s.closeCh) })
+		return
+	}
+
+	select {
+	case s.reconnectCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -250,7 +260,7 @@ func (s *PriceSubscriber) readLoop() {
 			select {
 			case <-s.closeCh:
 				return
-			default:
+			case <-s.reconnectCh:
 				continue
 			}
 		}
@@ -299,7 +309,9 @@ func (s *PriceSubscriber) handlePriceEvent(event PriceEvent) {
 
 	filename := fmt.Sprintf("%s_%s_%s.csv", s.marketSlug, s.filePrefix, safeSymbol)
 	tickPath := filepath.Join(s.outputDir, filename)
-	util.AppendCSV(tickPath, []PriceRecord{record})
+	if err := util.AppendCSV(tickPath, []PriceRecord{record}); err != nil {
+		log.Printf("%s: failed to write CSV: %v", s.name, err)
+	}
 }
 
 func (s *PriceSubscriber) writeJSON(msg interface{}) error {
@@ -345,7 +357,7 @@ func (s *PriceSubscriber) SetMarketSlug(slug string) {
 }
 
 func (s *PriceSubscriber) Close() error {
-	close(s.closeCh)
+	s.closeOnce.Do(func() { close(s.closeCh) })
 
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
