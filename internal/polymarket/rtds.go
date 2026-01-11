@@ -257,12 +257,14 @@ func (s *PriceSubscriber) readLoop() {
 
 		_, message, err := conn.ReadMessage()
 		if err != nil {
+			log.Printf("%s: read error: %v", s.name, err)
+			s.triggerReconnect()
 			select {
+			case <-s.reconnectCh:
 			case <-s.closeCh:
 				return
-			case <-s.reconnectCh:
-				continue
 			}
+			continue
 		}
 
 		s.handleMessage(message)
