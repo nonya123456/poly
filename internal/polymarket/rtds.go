@@ -54,31 +54,29 @@ func (r PriceRecord) CSVRow() []string {
 }
 
 type PriceSubscriber struct {
-	conn            *websocket.Conn
-	outputDir       string
-	marketSlug      string
-	symbols         map[string]struct{}
-	done            chan struct{}
-	closeCh         chan struct{}
-	closeOnce       sync.Once
-	connMu          sync.Mutex
-	mu              sync.Mutex
-	reconnectMu     sync.Mutex
-	pongCh          chan struct{}
-	reconnectCh     chan struct{}
-	name            string
-	topic           string
-	topicType       string
-	filePrefix      string
-	filterFormatter func([]string) string
+	conn        *websocket.Conn
+	outputDir   string
+	marketSlug  string
+	symbols     map[string]struct{}
+	done        chan struct{}
+	closeCh     chan struct{}
+	closeOnce   sync.Once
+	connMu      sync.Mutex
+	mu          sync.Mutex
+	reconnectMu sync.Mutex
+	pongCh      chan struct{}
+	reconnectCh chan struct{}
+	name        string
+	topic       string
+	topicType   string
+	filePrefix  string
 }
 
 type PriceSubscriberConfig struct {
-	Name            string
-	Topic           string
-	TopicType       string
-	FilePrefix      string
-	FilterFormatter func([]string) string
+	Name       string
+	Topic      string
+	TopicType  string
+	FilePrefix string
 }
 
 func NewPriceSubscriber(outputDir string, cfg PriceSubscriberConfig) (*PriceSubscriber, error) {
@@ -88,18 +86,17 @@ func NewPriceSubscriber(outputDir string, cfg PriceSubscriberConfig) (*PriceSubs
 	}
 
 	s := &PriceSubscriber{
-		conn:            conn,
-		outputDir:       outputDir,
-		symbols:         make(map[string]struct{}),
-		done:            make(chan struct{}),
-		closeCh:         make(chan struct{}),
-		pongCh:          make(chan struct{}, 1),
-		reconnectCh:     make(chan struct{}, 1),
-		name:            cfg.Name,
-		topic:           cfg.Topic,
-		topicType:       cfg.TopicType,
-		filePrefix:      cfg.FilePrefix,
-		filterFormatter: cfg.FilterFormatter,
+		conn:        conn,
+		outputDir:   outputDir,
+		symbols:     make(map[string]struct{}),
+		done:        make(chan struct{}),
+		closeCh:     make(chan struct{}),
+		pongCh:      make(chan struct{}, 1),
+		reconnectCh: make(chan struct{}, 1),
+		name:        cfg.Name,
+		topic:       cfg.Topic,
+		topicType:   cfg.TopicType,
+		filePrefix:  cfg.FilePrefix,
 	}
 
 	conn.SetPongHandler(s.pongHandler)
@@ -181,15 +178,14 @@ func (s *PriceSubscriber) resubscribe() error {
 		return nil
 	}
 
-	var filters string
-	if s.filterFormatter != nil {
-		filters = s.filterFormatter(symbols)
-	}
-
 	return s.writeJSON(rtdsMessage{
 		Action: "subscribe",
 		Subscriptions: []rtdsSubscription{
-			{Topic: s.topic, Type: s.topicType, Filters: filters},
+			{
+				Topic:   s.topic,
+				Type:    s.topicType,
+				Filters: formatFilter(symbols),
+			},
 		},
 	})
 }
@@ -348,17 +344,19 @@ func (s *PriceSubscriber) Subscribe(symbols []string) error {
 	}
 	s.mu.Unlock()
 
-	var filters string
-	if s.filterFormatter != nil {
-		filters = s.filterFormatter(symbols)
-	}
-
-	return s.writeJSON(rtdsMessage{
+	msg := rtdsMessage{
 		Action: "subscribe",
 		Subscriptions: []rtdsSubscription{
-			{Topic: s.topic, Type: s.topicType, Filters: filters},
+			{
+				Topic:   s.topic,
+				Type:    s.topicType,
+				Filters: formatFilter(symbols),
+			},
 		},
-	})
+	}
+	log.Printf("%s: Subscribe: sending %+v", s.name, msg)
+
+	return s.writeJSON(msg)
 }
 
 func (s *PriceSubscriber) Unsubscribe(symbols []string) error {
@@ -399,15 +397,19 @@ func (s *PriceSubscriber) Done() <-chan struct{} {
 	return s.done
 }
 
+func formatFilter(symbols []string) string {
+	if len(symbols) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(`{"symbol":"%s"}`, symbols[0])
+}
+
 func NewCryptoSubscriber(outputDir string) (*PriceSubscriber, error) {
 	return NewPriceSubscriber(outputDir, PriceSubscriberConfig{
 		Name:       "binance",
 		Topic:      "crypto_prices",
 		TopicType:  "update",
 		FilePrefix: "binance",
-		FilterFormatter: func(symbols []string) string {
-			return strings.Join(symbols, ",")
-		},
 	})
 }
 
@@ -417,13 +419,5 @@ func NewChainlinkSubscriber(outputDir string) (*PriceSubscriber, error) {
 		Topic:      "crypto_prices_chainlink",
 		TopicType:  "*",
 		FilePrefix: "chainlink",
-		FilterFormatter: func(symbols []string) string {
-			if len(symbols) == 0 {
-				return ""
-			}
-			// Chainlink expects JSON format: {"symbol":"eth/usd"}
-			// For now, use the first symbol
-			return fmt.Sprintf(`{"symbol":"%s"}`, symbols[0])
-		},
 	})
 }
