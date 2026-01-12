@@ -192,7 +192,7 @@ func (s *PriceSubscriber) resubscribe() error {
 
 func (s *PriceSubscriber) pingLoop() {
 	const (
-		pingInterval = 30 * time.Second
+		pingInterval = 5 * time.Second
 		pongTimeout  = 10 * time.Second
 	)
 
@@ -212,8 +212,6 @@ func (s *PriceSubscriber) pingLoop() {
 			s.triggerReconnect()
 			continue
 		}
-
-		log.Printf("%s: ping sent", s.name)
 
 		select {
 		case <-s.pongCh:
