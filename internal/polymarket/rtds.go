@@ -107,6 +107,7 @@ func NewPriceSubscriber(outputDir string, cfg PriceSubscriberConfig) (*PriceSubs
 }
 
 func (s *PriceSubscriber) pongHandler(appData string) error {
+	log.Printf("%s: pong received", s.name)
 	select {
 	case s.pongCh <- struct{}{}:
 	default:
@@ -201,6 +202,11 @@ func (s *PriceSubscriber) pingLoop() {
 
 		if err != nil {
 			log.Printf("%s: ping error: %v", s.name, err)
+		} else {
+			log.Printf("%s: ping sent", s.name)
+		}
+
+		if err != nil {
 			s.triggerReconnect()
 			continue
 		}
