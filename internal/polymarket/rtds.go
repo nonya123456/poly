@@ -54,29 +54,31 @@ func (r PriceRecord) CSVRow() []string {
 }
 
 type PriceSubscriber struct {
-	conn        *websocket.Conn
-	outputDir   string
-	marketSlug  string
-	symbols     map[string]struct{}
-	done        chan struct{}
-	closeCh     chan struct{}
-	closeOnce   sync.Once
-	connMu      sync.Mutex
-	mu          sync.Mutex
-	reconnectMu sync.Mutex
-	pongCh      chan struct{}
-	reconnectCh chan struct{}
-	name        string
-	topic       string
-	topicType   string
-	filePrefix  string
+	conn            *websocket.Conn
+	outputDir       string
+	marketSlug      string
+	symbols         map[string]struct{}
+	done            chan struct{}
+	closeCh         chan struct{}
+	closeOnce       sync.Once
+	connMu          sync.Mutex
+	mu              sync.Mutex
+	reconnectMu     sync.Mutex
+	pongCh          chan struct{}
+	reconnectCh     chan struct{}
+	name            string
+	topic           string
+	topicType       string
+	filePrefix      string
+	filterFormatter func([]string) string
 }
 
 type PriceSubscriberConfig struct {
-	Name       string
-	Topic      string
-	TopicType  string
-	FilePrefix string
+	Name            string
+	Topic           string
+	TopicType       string
+	FilePrefix      string
+	FilterFormatter func([]string) string
 }
 
 func NewPriceSubscriber(outputDir string, cfg PriceSubscriberConfig) (*PriceSubscriber, error) {
@@ -86,17 +88,18 @@ func NewPriceSubscriber(outputDir string, cfg PriceSubscriberConfig) (*PriceSubs
 	}
 
 	s := &PriceSubscriber{
-		conn:        conn,
-		outputDir:   outputDir,
-		symbols:     make(map[string]struct{}),
-		done:        make(chan struct{}),
-		closeCh:     make(chan struct{}),
-		pongCh:      make(chan struct{}, 1),
-		reconnectCh: make(chan struct{}, 1),
-		name:        cfg.Name,
-		topic:       cfg.Topic,
-		topicType:   cfg.TopicType,
-		filePrefix:  cfg.FilePrefix,
+		conn:            conn,
+		outputDir:       outputDir,
+		symbols:         make(map[string]struct{}),
+		done:            make(chan struct{}),
+		closeCh:         make(chan struct{}),
+		pongCh:          make(chan struct{}, 1),
+		reconnectCh:     make(chan struct{}, 1),
+		name:            cfg.Name,
+		topic:           cfg.Topic,
+		topicType:       cfg.TopicType,
+		filePrefix:      cfg.FilePrefix,
+		filterFormatter: cfg.FilterFormatter,
 	}
 
 	conn.SetPongHandler(s.pongHandler)
@@ -168,17 +171,25 @@ func (s *PriceSubscriber) reconnect() error {
 
 func (s *PriceSubscriber) resubscribe() error {
 	s.mu.Lock()
-	hasSymbols := len(s.symbols) > 0
+	symbols := make([]string, 0, len(s.symbols))
+	for sym := range s.symbols {
+		symbols = append(symbols, sym)
+	}
 	s.mu.Unlock()
 
-	if !hasSymbols {
+	if len(symbols) == 0 {
 		return nil
+	}
+
+	var filters string
+	if s.filterFormatter != nil {
+		filters = s.filterFormatter(symbols)
 	}
 
 	return s.writeJSON(rtdsMessage{
 		Action: "subscribe",
 		Subscriptions: []rtdsSubscription{
-			{Topic: s.topic, Type: s.topicType},
+			{Topic: s.topic, Type: s.topicType, Filters: filters},
 		},
 	})
 }
@@ -337,10 +348,15 @@ func (s *PriceSubscriber) Subscribe(symbols []string) error {
 	}
 	s.mu.Unlock()
 
+	var filters string
+	if s.filterFormatter != nil {
+		filters = s.filterFormatter(symbols)
+	}
+
 	return s.writeJSON(rtdsMessage{
 		Action: "subscribe",
 		Subscriptions: []rtdsSubscription{
-			{Topic: s.topic, Type: s.topicType},
+			{Topic: s.topic, Type: s.topicType, Filters: filters},
 		},
 	})
 }
@@ -389,6 +405,9 @@ func NewCryptoSubscriber(outputDir string) (*PriceSubscriber, error) {
 		Topic:      "crypto_prices",
 		TopicType:  "update",
 		FilePrefix: "binance",
+		FilterFormatter: func(symbols []string) string {
+			return strings.Join(symbols, ",")
+		},
 	})
 }
 
@@ -398,5 +417,13 @@ func NewChainlinkSubscriber(outputDir string) (*PriceSubscriber, error) {
 		Topic:      "crypto_prices_chainlink",
 		TopicType:  "*",
 		FilePrefix: "chainlink",
+		FilterFormatter: func(symbols []string) string {
+			if len(symbols) == 0 {
+				return ""
+			}
+			// Chainlink expects JSON format: {"symbol":"eth/usd"}
+			// For now, use the first symbol
+			return fmt.Sprintf(`{"symbol":"%s"}`, symbols[0])
+		},
 	})
 }
