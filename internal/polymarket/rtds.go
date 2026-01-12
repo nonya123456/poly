@@ -202,14 +202,11 @@ func (s *PriceSubscriber) pingLoop() {
 
 		if err != nil {
 			log.Printf("%s: ping error: %v", s.name, err)
-		} else {
-			log.Printf("%s: ping sent", s.name)
-		}
-
-		if err != nil {
 			s.triggerReconnect()
 			continue
 		}
+
+		log.Printf("%s: ping sent", s.name)
 
 		select {
 		case <-s.pongCh:
@@ -279,15 +276,18 @@ func (s *PriceSubscriber) readLoop() {
 
 func (s *PriceSubscriber) handleMessage(data []byte) {
 	if len(data) == 0 || (data[0] != '{' && data[0] != '[') {
+		log.Printf("%s: handleMessage: invalid data format", s.name)
 		return
 	}
 
 	var event PriceEvent
 	if err := json.Unmarshal(data, &event); err != nil {
+		log.Printf("%s: handleMessage: json unmarshal error: %v", s.name, err)
 		return
 	}
 
 	if event.Topic != s.topic || event.Type != "update" {
+		log.Printf("%s: handleMessage: skipping event (topic=%s, type=%s)", s.name, event.Topic, event.Type)
 		return
 	}
 
@@ -302,10 +302,12 @@ func (s *PriceSubscriber) handlePriceEvent(event PriceEvent) {
 	defer s.mu.Unlock()
 
 	if _, ok := s.symbols[symbol]; !ok {
+		log.Printf("%s: handlePriceEvent: unknown symbol: %s", s.name, symbol)
 		return
 	}
 
 	if s.marketSlug == "" {
+		log.Printf("%s: handlePriceEvent: market slug not set", s.name)
 		return
 	}
 
